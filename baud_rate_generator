@@ -1,0 +1,50 @@
+module baud_rate_generator(  
+    input wire clk,
+    input wire rst,
+    input wire cnt_en,
+    output wire o_mid_tick,
+    output wire end_tick,
+    output reg [9:0] tick_cnt,
+    output reg [3:0] sample_cnt,
+    output wire sample_tick
+);
+
+    parameter clk_freq  = 100000000;
+    parameter baud_rate = 9600;
+    
+    localparam oversample_rate   = 16;
+    localparam cycles_per_tick   = clk_freq / (baud_rate * oversample_rate);
+    localparam tick_cnt_width    = $clog2(cycles_per_tick);
+    localparam mid_sample        = oversample_rate / 2 - 1;
+    localparam end_sample        = oversample_rate - 1;
+
+
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tick_cnt   <= 0;
+            sample_cnt <= 0;
+        end else begin
+            if (cnt_en) begin
+                if (tick_cnt == cycles_per_tick - 1) begin
+                    tick_cnt <= 0;
+                    if (sample_cnt == end_sample) begin
+                        sample_cnt <= 0;
+                    end else begin
+                        sample_cnt <= sample_cnt + 1;
+                    end
+                end else begin
+                    tick_cnt <= tick_cnt + 1;
+                end
+            end else begin
+                tick_cnt   <= 0;
+                sample_cnt <= 0;
+            end
+        end
+    end
+
+    assign sample_tick = (tick_cnt == cycles_per_tick - 1);
+    assign o_mid_tick = (sample_cnt == mid_sample) && sample_tick;
+    assign end_tick = (sample_cnt == end_sample) && sample_tick;
+
+endmodule
