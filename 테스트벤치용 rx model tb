@@ -1,0 +1,104 @@
+`timescale 1ns / 1ps
+
+module uart_rx_final_tb;
+
+    // --- 파라미터 및 상수 정의 ---
+    localparam c_CLK_FREQ    = 100_000_000;
+    localparam c_BAUD_RATE   = 9600;
+    localparam c_CLK_PERIOD  = 10;
+    localparam c_BIT_PERIOD_NS = (c_CLK_FREQ / c_BAUD_RATE) * c_CLK_PERIOD;
+
+    // --- 테스트벤치 신호 선언 ---
+    reg tb_clk;
+    reg tb_rst;
+    reg tb_serial_data;
+    reg tb_ack;
+
+    wire [7:0] tb_parallel_data;
+    wire [7:0] tb_rx_shift_reg;
+    wire       tb_valid;
+    wire tb_tick_cnt;
+    wire tb_mid_tick;
+    wire tb_sample_cnt;
+    wire tb_sample_tick;
+    
+
+    uart_rx #(
+        .clk_freq(c_CLK_FREQ),
+        .p_BAUD_RATE(c_BAUD_RATE)
+    ) UUT (
+        .clk_i(tb_clk),
+        .rst_i(tb_rst),
+        .serial_data_i(tb_serial_data),
+        .ack_i(tb_ack),
+        .parallel_data_o(tb_parallel_data),
+        .valid_o(tb_valid),
+        .rx_shift_reg(tb_rx_shift_reg),
+        .mid_tick(tb_mid_tick),
+        .tick_cnt(tb_tick_cnt),
+        .sample_cnt(tb_sample_cnt),
+        .sample_tick(tb_sample_tick)
+
+    );
+
+    // --- 클럭 생성 ---
+    always #((c_CLK_PERIOD)/2) tb_clk = ~tb_clk;
+
+    // --- 1바이트 전송 Task ---
+    task send_byte(input [7:0] data);
+        integer i;
+        begin
+            tb_serial_data = 1'b0; #c_BIT_PERIOD_NS;
+            for (i = 0; i < 8; i = i + 1) begin
+                tb_serial_data = data[i]; #c_BIT_PERIOD_NS;
+            end
+            tb_serial_data = 1'b1; #c_BIT_PERIOD_NS;
+            tb_serial_data = 1'b1;
+        end
+    endtask
+
+    // --- 테스트 시나리오 ---
+    initial begin
+        $display("[%0t ns] 시뮬레이션 시작: 모든 신호를 0으로 초기화.", $time);
+        tb_clk = 0; tb_rst = 0; tb_serial_data = 0; tb_ack = 0;
+            
+        #1000;
+
+        $display("[%0t ns] 리셋 시작 (100ns 유지)", $time);
+        tb_rst = 1; tb_serial_data = 1;
+        #1000;
+        
+        tb_rst = 0;
+        $display("[%0t ns] 리셋 해제. 테스트 시작.", $time);
+        
+        send_byte(8'h41); // 'A' 전송
+        
+        #1000
+        $display("[%0t ns] Valid 신호 감지. 데이터: %h", $time, tb_parallel_data);
+        
+        #10000; tb_ack = 1'b1; 
+        #10000; tb_ack = 1'b0;
+        #10000;
+        
+        $display("[%0t ns] [TEST] 두 번째 문자 'B'(0x42) 전송 시작", $time);
+send_byte(8'h42);
+
+// 두 번째 valid 신호 대기 및 확인
+#1000
+$display("[%0t ns] [PASS] 두 번째 Valid 신호 감지. 데이터: %h", $time, tb_parallel_data);
+
+// 두 번째 핸드셰이크
+#10000;
+tb_ack = 1'b1;
+#10000;
+tb_ack = 1'b0;
+
+// 시뮬레이션 종료
+#10000;
+$display("[%0t ns] 모든 테스트 완료.", $time);
+$finish;
+
+       
+    end
+
+endmodule
