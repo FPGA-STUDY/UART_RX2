@@ -1,0 +1,140 @@
+module uart_rx(
+    input wire clk_i, 
+    input wire rst_i, 
+    input wire serial_data_i, 
+    input wire ack_i, 
+    output reg [7:0] parallel_data_o,
+    output reg valid_o,
+    output reg overrun_o 
+);
+
+localparam ST_IDLE  = 3'b000;
+localparam ST_START = 3'b001;
+localparam ST_DATA  = 3'b010;
+localparam ST_STOP  = 3'b011;
+localparam ST_VALID = 3'b100;
+
+baud_rate_generator #(
+    .clk_freq(100000000),
+    .baud_rate(9600)
+    ) uut_baud_rate_generator (
+    .clk(clk_i),
+    .rst(rst_i),
+    .cnt_en(cnt_en),
+    .o_mid_tick(mid_tick),
+    .end_tick()
+    );
+
+reg [2:0] current_state, next_state;
+reg [2:0] bit_cnt;
+reg [7:0] rx_shift_reg;
+reg       shift_en;  
+reg       update_output_en;
+reg       next_valid_o;
+reg       next_overrun_o;
+
+wire      mid_tick; 
+wire      cnt_en;
+
+assign cnt_en = (current_state != ST_IDLE);
+
+always @(posedge clk_i or posedge rst_i) begin
+    if (rst_i) begin
+        current_state   <= ST_IDLE;
+        parallel_data_o <= 8'b0;
+        valid_o         <= 1'b0;
+        overrun_o       <= 1'b0;
+        bit_cnt         <= 3'd0;
+        rx_shift_reg    <= 8'b0;
+    end else begin
+        current_state <= next_state;
+        valid_o       <= next_valid_o;
+        overrun_o     <= next_overrun_o;
+
+        if (update_output_en) begin
+            parallel_data_o <= rx_shift_reg;
+        end
+       
+        if (shift_en) begin
+             rx_shift_reg <= {serial_data_i, rx_shift_reg[7:1]};
+        end
+        if ((current_state == ST_START) && (next_state == ST_DATA)) begin
+            bit_cnt <= 3'b0;
+        end 
+        else if (current_state == ST_DATA && mid_tick) begin
+            bit_cnt <= bit_cnt + 1'b1;
+        end        
+    end
+end
+
+always@(*) begin
+    next_state       = current_state;
+    next_valid_o     = 1'b0;
+    next_overrun_o   = 1'b0;
+    update_output_en = 1'b0;
+    shift_en = 1'b0;
+    
+    case(current_state)
+        ST_IDLE : begin
+            if(serial_data_i == 1'b0)
+                next_state = ST_START;
+        end
+
+        ST_START : begin
+            if(mid_tick) begin
+                if(serial_data_i == 1'b0)
+                    next_state = ST_DATA;
+                else 
+                    next_state = ST_IDLE;
+            end
+        end
+
+        ST_DATA : begin 
+            if(mid_tick) begin 
+                shift_en = 1'b1;
+                    
+                    if(bit_cnt == 3'd7)
+                        next_state = ST_STOP;
+            end
+        end
+
+        ST_STOP : begin 
+            if(mid_tick) begin 
+                if(serial_data_i == 1'b1) begin 
+                    next_state = ST_VALID;
+                    update_output_en = 1'b1;
+                end
+                else begin 
+                    next_state = ST_IDLE;
+                end
+            end
+        end 
+        
+        ST_VALID : begin 
+            next_valid_o = 1'b1;
+            
+            if(ack_i) begin 
+                next_state = ST_IDLE;
+                next_valid_o = 1'b0;
+            end
+            else if (serial_data_i == 1'b0) begin 
+                next_state = ST_START;
+                next_valid_o = 1'b0;
+                next_overrun_o = 1'b1;
+            end
+        end
+        
+        default: begin
+            next_state = ST_IDLE;
+        end
+        
+    endcase
+end
+
+endmodule
+
+
+            
+
+
+
