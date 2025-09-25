@@ -1,0 +1,136 @@
+module uart_rx #(
+    parameter p_CLK_FREQ  = 100_000_000,
+    parameter p_BAUD_RATE = 9600
+) (
+    input wire clk_i,
+    input wire rst_i,
+    input wire serial_data_i,
+    input wire ack_i,
+    output reg [7:0] parallel_data_o,
+    output reg valid_o
+);
+
+    localparam ST_IDLE  = 3'b000;
+    localparam ST_START = 3'b001;
+    localparam ST_DATA  = 3'b010;
+    localparam ST_STOP  = 3'b011;
+    localparam ST_VALID = 3'b100;
+
+    localparam c_OVERSAMPLE_RATE   = 16;
+    localparam c_CYCLES_PER_TICK   = p_CLK_FREQ / (p_BAUD_RATE * c_OVERSAMPLE_RATE);
+    localparam c_TICK_CNT_WIDTH    = $clog2(c_CYCLES_PER_TICK);
+    localparam c_SAMPLE_MID        = c_OVERSAMPLE_RATE / 2 - 1;
+    localparam c_SAMPLE_END        = c_OVERSAMPLE_RATE - 1;
+
+    reg [2:0] current_state, next_state;
+    reg [2:0] bit_cnt;
+    reg [7:0] rx_shift_reg;
+    reg       next_valid_o;
+
+    reg [9:0] tick_cnt;
+    reg [3:0]                  sample_cnt;
+    wire                       sample_tick;
+    wire                       mid_tick;
+    wire                       counting_en;
+
+    assign counting_en = (current_state != ST_IDLE);
+
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            tick_cnt   <= 0;
+            sample_cnt <= 0;
+        end else begin
+            if (counting_en) begin
+                if (tick_cnt == c_CYCLES_PER_TICK - 1) begin
+                    tick_cnt <= 0;
+                    if (sample_cnt == c_SAMPLE_END) begin
+                        sample_cnt <= 0;
+                    end else begin
+                        sample_cnt <= sample_cnt + 1;
+                    end
+                end else begin
+                    tick_cnt <= tick_cnt + 1;
+                end
+            end else begin
+                tick_cnt   <= 0;
+                sample_cnt <= 0;
+            end
+        end
+    end
+
+    assign sample_tick = (tick_cnt == c_CYCLES_PER_TICK - 1);
+    assign mid_tick    = (sample_cnt == c_SAMPLE_MID) && sample_tick;
+    
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            current_state   <= ST_IDLE;
+            parallel_data_o <= 8'b0;
+            valid_o         <= 1'b0;
+            bit_cnt         <= 3'd0;
+            rx_shift_reg    <= 8'h00;
+        end else begin
+            current_state <= next_state;
+            valid_o       <= next_valid_o;
+
+            if (current_state == ST_STOP && next_state == ST_VALID) begin
+                parallel_data_o <= rx_shift_reg;
+            end
+            if ((current_state == ST_START) && (next_state == ST_DATA)) begin
+                bit_cnt <= 3'b0;
+            end
+            else if (current_state == ST_DATA && mid_tick) begin
+                rx_shift_reg <= {serial_data_i, rx_shift_reg[7:1]};
+                bit_cnt      <= bit_cnt + 1;
+            end
+        end
+    end
+
+    // FSM 조합 회로
+    always@(*) begin
+        next_state   = current_state;
+        next_valid_o = 1'b0;
+
+        case(current_state)
+            ST_IDLE : begin
+                if(serial_data_i == 1'b0)
+                    next_state = ST_START;
+            end
+
+            ST_START : begin
+                if(mid_tick) begin
+                    if(serial_data_i == 1'b0)
+                        next_state = ST_DATA;
+                    else
+                        next_state = ST_IDLE;
+                end
+            end
+
+            ST_DATA : begin
+                if(mid_tick && (bit_cnt == 3'd7))
+                    next_state = ST_STOP;
+            end
+
+            ST_STOP : begin
+                if(mid_tick) begin
+                    if(serial_data_i == 1'b1)
+                        next_state = ST_VALID;
+                    else
+                        next_state = ST_IDLE;
+                end
+            end
+
+            ST_VALID : begin
+                next_valid_o = 1'b1;
+                if(ack_i) begin
+                    next_state   = ST_IDLE;
+                    next_valid_o = 1'b0;
+                end
+            end
+
+            default: begin
+                next_state = ST_IDLE;
+            end
+        endcase
+    end
+
+endmodule
