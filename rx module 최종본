@@ -1,0 +1,129 @@
+module uart_rx #(
+    parameter p_CLK_FREQ  = 100_000_000,
+    parameter p_BAUD_RATE = 9600
+) (
+    input wire clk_i,
+    input wire rst_i,
+    input wire serial_data_i,
+    input wire ready_i,           // <<-- 1. 포트 변경: ack_i -> ready_i
+    output wire [7:0] parallel_data_o, // <<-- 2. 출력 방식 변경: reg -> wire
+    output wire       valid_o     // <<-- 2. 출력 방식 변경: reg -> wire
+
+);
+
+    // --- FSM 상태 정의 ---
+    localparam ST_IDLE    = 3'b000;
+    localparam ST_START   = 3'b001;
+    localparam ST_DATA    = 3'b010;
+    localparam ST_STOP    = 3'b011;
+    localparam ST_CLEANUP = 3'b100; // <<-- 3. 상태 변경: ST_VALID -> ST_CLEANUP
+
+    // --- 타이머 상수 ---
+    localparam c_OVERSAMPLE_RATE   = 16;
+    localparam c_CYCLES_PER_TICK   = p_CLK_FREQ / (p_BAUD_RATE * c_OVERSAMPLE_RATE);
+    localparam c_TICK_CNT_WIDTH    = $clog2(c_CYCLES_PER_TICK);
+    localparam c_SAMPLE_MID        = c_OVERSAMPLE_RATE / 2 - 1;
+    localparam c_SAMPLE_END        = c_OVERSAMPLE_RATE - 1;
+
+    // --- 내부 신호 ---
+    reg [2:0] current_state, next_state;
+    reg [2:0] bit_cnt;
+    reg [7:0] rx_data_reg;
+    reg       valid_pulse;
+    reg [9:0] tick_cnt;
+    reg [3:0] sample_cnt;
+    wire  sample_tick;
+    wire  mid_tick;
+    wire  counting_en;
+
+    assign counting_en     = (current_state != ST_IDLE);
+    assign sample_tick     = (tick_cnt == c_CYCLES_PER_TICK - 1);
+    assign mid_tick        = (sample_cnt == c_SAMPLE_MID) && sample_tick;
+    
+    // --- 2. 출력 방식 변경 ---
+    assign parallel_data_o = rx_data_reg;
+    assign valid_o         = valid_pulse;
+
+    // --- 순차 회로 ---
+    always @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) begin
+            current_state <= ST_IDLE;
+            bit_cnt       <= 3'd0;
+            rx_data_reg   <= 8'h00;
+            tick_cnt      <= 0;
+            sample_cnt    <= 0;
+        end else begin
+            current_state <= next_state;
+
+            // 타이머 로직
+            if (counting_en) begin
+                if (tick_cnt == c_CYCLES_PER_TICK - 1) begin
+                    tick_cnt <= 0;
+                    if (sample_cnt == c_SAMPLE_END) sample_cnt <= 0;
+                    else sample_cnt <= sample_cnt + 1;
+                end else begin
+                    tick_cnt <= tick_cnt + 1;
+                end
+            end else begin
+                tick_cnt   <= 0;
+                sample_cnt <= 0;
+            end
+
+            // 데이터 처리 로직
+            if ((current_state == ST_START) && (next_state == ST_DATA)) begin
+                bit_cnt <= 3'd0;
+            end
+            else if (current_state == ST_DATA && mid_tick) begin
+                rx_data_reg <= {serial_data_i, rx_data_reg[7:1]};
+                bit_cnt     <= bit_cnt + 1;
+            end
+        end
+    end
+
+    // --- 조합 회로 ---
+    always@(*) begin
+        next_state  = current_state;
+        valid_pulse = 1'b0;
+
+        case(current_state)
+            ST_IDLE : begin
+                // --- 5. IDLE 로직 변경 ---
+                // Start bit가 감지되고, AND 외부 모듈이 준비되었을 때만 시작
+                if (serial_data_i == 1'b0 && ready_i == 1'b1) begin
+                    next_state = ST_START;
+                end
+            end
+
+            ST_START : begin
+                if(mid_tick) begin
+                    if(serial_data_i == 1'b0) next_state = ST_DATA;
+                    else next_state = ST_IDLE;
+                end
+            end
+
+            ST_DATA : begin
+                if(mid_tick && (bit_cnt == 3'd7))
+                    next_state = ST_STOP;
+            end
+
+            ST_STOP : begin
+                if(mid_tick) begin
+                    if(serial_data_i == 1'b1)
+                        next_state = ST_CLEANUP; // <<-- 3. VALID 대신 CLEANUP으로
+                    else
+                        next_state = ST_IDLE;
+                end
+            end
+
+            ST_CLEANUP : begin // <<-- 3. VALID 대신 CLEANUP 상태
+                valid_pulse = 1'b1; // valid 신호를 한 클럭만 켬
+                next_state  = ST_IDLE;
+            end
+
+            default: begin
+                next_state = ST_IDLE;
+            end
+        endcase
+    end
+
+endmodule
