@@ -1,0 +1,155 @@
+`timescale 1ns/1ps
+
+module tb_uart_rx;
+  // ---- 파라미터(네 모듈과 동일) ----
+  localparam CLK_HZ   = 100_000_000;
+  localparam BAUD     = 9600;
+  localparam BIT_NS   = 1_000_000_000 / BAUD; // 9600bps ≈ 104_166ns
+
+  // ---- TB 신호 ----
+  reg  clk_i = 0;
+  reg  rst_i = 1;
+  reg  serial_data_i = 1'b1; // UART idle = 1
+  reg  ready_i = 1'b1;
+
+  wire [7:0] parallel_data_o;
+  wire       valid_o;
+  wire [9:0] tick_cnt;
+  wire [3:0] sample_cnt;
+  wire       sample_tick, mid_tick;
+
+  // ---- DUT 인스턴스 ----
+  uart_rx #(
+    .p_CLK_FREQ (CLK_HZ),
+    .p_BAUD_RATE(BAUD)
+  ) dut (
+    .clk_i(clk_i),
+    .rst_i(rst_i),
+    .serial_data_i(serial_data_i),
+    .ready_i(ready_i),
+    .parallel_data_o(parallel_data_o),
+    .valid_o(valid_o),
+    .tick_cnt(tick_cnt),
+    .sample_cnt(sample_cnt),
+    .sample_tick(sample_tick),
+    .mid_tick(mid_tick)
+  );
+
+  // 100 MHz 클럭
+  always #5 clk_i = ~clk_i;
+
+  // UART 프레임(8N1) 전송 태스크: LSB-first, start(0), data[7:0], stop(1)
+  task send_byte(input [7:0] b);
+    integer i;
+    begin
+      // start bit
+      serial_data_i = 1'b0;  #(BIT_NS);
+
+      // data bits (LSB first)
+      for (i = 0; i < 8; i = i + 1) begin
+        serial_data_i = b[i]; #(BIT_NS);
+      end
+
+      // stop bit (1)
+      serial_data_i = 1'b1;  #(BIT_NS);
+
+      // inter-frame idle
+      #(BIT_NS);
+    end
+  endtask
+
+  // 모니터: valid_o 펄스 시점에 수신값 출력
+  always @(posedge clk_i) begin
+    if (valid_o)
+      $display("[%0t ns] RX DONE: 0x%02h", $time, parallel_data_o);
+  end
+
+  initial begin
+
+    // ---- 1) 초기값: 모두 0/아이들하이/리셋온 ----
+    serial_data_i = 1'b1; // idle
+    ready_i       = 1'b1;
+    rst_i         = 1'b1;
+
+    // ---- 2) 리셋 해제 ----
+    #(5000);          // 500ns 정도 후
+    rst_i = 1'b0;
+
+    #30000;
+    
+    // ---- 3) 정상 프레임들 송신 ----
+    send_byte(8'h55); // 0101_0101
+    
+    #20000 rst_i=1;
+    #1000 rst_i = 0;
+    
+    #10000;
+    
+    send_byte(8'hAA); // 1010_1010
+    
+    #100000;
+    
+    ready_i = 0;
+    serial_data_i = 0;
+    
+    #1000000;
+    
+    ready_i = 1;
+    
+    #100000;
+    
+    send_byte(8'h00);
+    
+    send_byte(8'h81);
+
+    // ---- 4) ready_i=0 동안 스타트 시도(네 설계에선 시작 자체를 막음) ----
+    ready_i = 1'b0;
+    send_byte(8'h12); // 이 프레임은 무시되어야 함(START 진입 안 함)
+    #(BIT_NS*2);
+    ready_i = 1'b1;
+    send_byte(8'h34); // 다시 정상 수신
+    #(BIT_NS*2);
+
+// ---- 추가 테스트 1: Start Bit 글리치(Glitch) 테스트 ----
+$display("[%0t ns] [TEST] Start Bit Glitch 테스트 시작", $time);
+ready_i = 1'b1;       // 수신기는 준비된 상태에서
+serial_data_i = 1'b0; // Start Bit처럼 0으로 내렸다가,
+#(BIT_NS / 4);        // 비트 주기의 1/4만 유지하고 (짧은 노이즈 흉내)
+serial_data_i = 1'b1; // 바로 1로 복귀
+$display("[%0t ns] [CHECK] Glitch 이후 valid_o가 발생하지 않아야 함", $time);
+#(BIT_NS * 2);        // 2 비트 시간 동안 valid_o가 발생하는지 지켜봄
+
+#10000;
+
+// ---- 추가 테스트 2: Framing Error (수동, 루프 없음) ----
+$display("[%0t ns] [TEST] Framing Error (Stop Bit = 0) 테스트 시작", $time);
+ready_i = 1'b1;
+
+// 1. Start Bit
+serial_data_i = 1'b0; #(BIT_NS);
+
+// 2. Data Bits (8'hC3 -> 11000011 -> LSB first: 1,1,0,0,0,0,0,1)
+// for 루프 대신 한 줄씩 직접 전송합니다.
+serial_data_i = 1'b1; #(BIT_NS); // Data 0
+serial_data_i = 1'b1; #(BIT_NS); // Data 1
+serial_data_i = 1'b0; #(BIT_NS); // Data 2
+serial_data_i = 1'b0; #(BIT_NS); // Data 3
+serial_data_i = 1'b0; #(BIT_NS); // Data 4
+serial_data_i = 1'b0; #(BIT_NS); // Data 5
+serial_data_i = 1'b0; #(BIT_NS); // Data 6
+serial_data_i = 1'b1; #(BIT_NS); // Data 7
+
+// 3. Stop Bit (오류 주입)
+serial_data_i = 1'b0; #(BIT_NS*0.5);
+
+// 4. Idle 상태 복귀
+serial_data_i = 1'b1;
+
+$display("[%0t ns] [CHECK] Framing Error 이후 RX DONE 메시지가 출력되지 않아야 함", $time);
+#(BIT_NS*0.1);
+$display("[%0t ns] [INFO] 테스트 사이의 IDLE 상태 진입.", $time);
+ready_i = 1'b0; // Parser가 준비 안됨 상태로 만들어 추가 수신을 막음
+#(BIT_NS * 5);  // 5 비트 시간 동안 안정적인 IDLE 상태 유지
+  end
+
+endmodule
